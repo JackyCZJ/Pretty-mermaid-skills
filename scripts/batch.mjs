@@ -36,6 +36,111 @@ async function loadBeautifulMermaid() {
   }
 }
 
+// Convert SVG with CSS variables to flat SVG with actual colors
+function flattenSvg(svg, colors) {
+  const styleMatch = svg.match(/style="([^"]*)"/);
+  const cssVars = {};
+  
+  if (styleMatch) {
+    const style = styleMatch[1];
+    const varMatches = style.matchAll(/--([\w-]+):([^;]+)/g);
+    for (const match of varMatches) {
+      cssVars[`--${match[1].trim()}`] = match[2].trim();
+    }
+  }
+  
+  const allVars = { ...cssVars, ...colors };
+  
+  const bg = allVars['--bg'] || allVars.bg || '#FFFFFF';
+  const fg = allVars['--fg'] || allVars.fg || '#27272A';
+  const line = allVars['--line'] || allVars.line || mixColors(fg, bg, 0.3);
+  const accent = allVars['--accent'] || allVars.accent || mixColors(fg, bg, 0.5);
+  const muted = allVars['--muted'] || allVars.muted || mixColors(fg, bg, 0.4);
+  const surface = allVars['--surface'] || allVars.surface || mixColors(fg, bg, 0.03);
+  const border = allVars['--border'] || allVars.border || mixColors(fg, bg, 0.2);
+  
+  const computed = {
+    '--bg': bg,
+    '--fg': fg,
+    '--line': line,
+    '--accent': accent,
+    '--muted': muted,
+    '--surface': surface,
+    '--border': border,
+    '--_text': fg,
+    '--_text-sec': muted,
+    '--_text-muted': muted,
+    '--_text-faint': mixColors(fg, bg, 0.25),
+    '--_line': line,
+    '--_arrow': accent,
+    '--_node-fill': surface,
+    '--_node-stroke': border,
+    '--_group-fill': bg,
+    '--_group-hdr': mixColors(fg, bg, 0.05),
+    '--_inner-stroke': mixColors(fg, bg, 0.12),
+    '--_key-badge': mixColors(fg, bg, 0.1),
+  };
+  
+  let flatSvg = svg;
+  for (const [varName, value] of Object.entries(computed)) {
+    const regex = new RegExp(`var\\(${varName.replace('--', '\\-\\-')}\\)`, 'g');
+    flatSvg = flatSvg.replace(regex, value);
+  }
+  
+  flatSvg = flatSvg.replace(/style="[^"]*--[\w-]+:[^;]+;?\s*/g, (match) => {
+    const cleaned = match.replace(/--[\w-]+:[^;]+;?\s*/g, '');
+    return cleaned === 'style=""' ? '' : cleaned;
+  });
+  
+  flatSvg = flatSvg.replace(/\u003cstyle\u003e[\s\S]*?@import[\s\S]*?\u003c\/style\u003e/, '');
+  
+  return flatSvg;
+}
+
+function mixColors(fg, bg, ratio) {
+  const fgRgb = hexToRgb(fg);
+  const bgRgb = hexToRgb(bg);
+  if (!fgRgb || !bgRgb) return fg;
+  
+  const r = Math.round(bgRgb.r + (fgRgb.r - bgRgb.r) * ratio);
+  const g = Math.round(bgRgb.g + (fgRgb.g - bgRgb.g) * ratio);
+  const b = Math.round(bgRgb.b + (fgRgb.b - bgRgb.b) * ratio);
+  
+  return rgbToHex(r, g, b);
+}
+
+function hexToRgb(hex) {
+  const match = hex.match(/^#([0-9a-fA-F]{6})$/);
+  if (!match) return null;
+  const bigint = parseInt(match[1], 16);
+  return {
+    r: (bigint >> 16) & 255,
+    g: (bigint >> 8) & 255,
+    b: bigint & 255,
+  };
+}
+
+function rgbToHex(r, g, b) {
+  return '#' + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('');
+}
+
+function svgToPng(svg, outputPath, width = 800) {
+  const tempSvg = outputPath.replace(/\.png$/, '.temp.svg');
+  writeFileSync(tempSvg, svg);
+  
+  try {
+    execSync(`rsvg-convert --width ${width} "${tempSvg}" -o "${outputPath}"`, {
+      stdio: ['pipe', 'pipe', 'inherit'],
+      timeout: 30000,
+    });
+    try { writeFileSync(tempSvg, ''); } catch {}
+    return true;
+  } catch (e) {
+    console.error(`PNG conversion failed: ${e.message}`);
+    return false;
+  }
+}
+
 function parseArgs() {
   const args = process.argv.slice(2);
   const opts = {
@@ -48,6 +153,7 @@ function parseArgs() {
     transparent: false,
     useAscii: false,
     workers: 4,
+    width: 800,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -61,6 +167,7 @@ function parseArgs() {
       case '--theme': case '-t': opts.theme = val; i++; break;
       case '--bg': opts.bg = val; i++; break;
       case '--fg': opts.fg = val; i++; break;
+      case '--width': opts.width = parseInt(val); i++; break;
       case '--transparent': opts.transparent = true; break;
       case '--use-ascii': opts.useAscii = true; break;
       case '--workers': case '-w': opts.workers = parseInt(val); i++; break;
@@ -70,10 +177,11 @@ function parseArgs() {
 Options:
   -i, --input-dir <dir>    Input directory containing .mmd files [required]
   -o, --output-dir <dir>   Output directory for rendered files [required]
-  -f, --format <fmt>       Output format: svg | ascii (default: svg)
+  -f, --format <fmt>       Output format: svg | png | ascii (default: svg)
   -t, --theme <name>       Theme name (e.g. tokyo-night, dracula)
       --bg <hex>           Background color
       --fg <hex>           Foreground color
+      --width <n>           PNG width in pixels (default: 800)
       --transparent        Transparent background (SVG only)
       --use-ascii          Pure ASCII instead of Unicode (ASCII only)
   -w, --workers <n>        Parallel workers (default: 4)`);
@@ -100,24 +208,35 @@ Options:
 async function renderFile(file, inputDir, outputDir, opts, lib) {
   const { renderMermaid, renderMermaidAscii, THEMES } = lib;
   const inputPath = join(inputDir, file);
-  const ext = opts.format === 'svg' ? '.svg' : '.txt';
-  const outputPath = join(outputDir, file.replace(/\.mmd$/, ext));
   const input = readFileSync(inputPath, 'utf8');
 
   if (opts.format === 'ascii') {
+    const ext = '.txt';
+    const outputPath = join(outputDir, file.replace(/\.mmd$/, ext));
     const ascii = renderMermaidAscii(input, { useAscii: opts.useAscii });
     writeFileSync(outputPath, ascii);
-  } else {
-    const theme = opts.theme ? THEMES[opts.theme] : undefined;
-    const colors = theme || {
-      ...(opts.bg && { bg: opts.bg }),
-      ...(opts.fg && { fg: opts.fg }),
-    };
+    return;
+  }
 
-    const svg = await renderMermaid(input, {
-      ...colors,
-      transparent: opts.transparent,
-    });
+  const theme = opts.theme ? THEMES[opts.theme] : undefined;
+  const colors = theme || {
+    ...(opts.bg && { bg: opts.bg }),
+    ...(opts.fg && { fg: opts.fg }),
+  };
+
+  const svg = await renderMermaid(input, {
+    ...colors,
+    transparent: opts.transparent,
+  });
+
+  if (opts.format === 'png') {
+    const flatSvg = flattenSvg(svg, colors);
+    const outputPath = join(outputDir, file.replace(/\.mmd$/, '.png'));
+    if (!svgToPng(flatSvg, outputPath, opts.width)) {
+      throw new Error('PNG conversion failed');
+    }
+  } else {
+    const outputPath = join(outputDir, file.replace(/\.mmd$/, '.svg'));
     writeFileSync(outputPath, svg);
   }
 }
@@ -139,7 +258,6 @@ async function main() {
   let success = 0;
   const failed = [];
 
-  // Process in batches of `workers` size
   for (let i = 0; i < files.length; i += opts.workers) {
     const batch = files.slice(i, i + opts.workers);
     const results = await Promise.allSettled(
