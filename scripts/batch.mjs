@@ -3,7 +3,9 @@
 import { execSync } from 'child_process';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from 'fs';
+import { tmpdir } from 'os';
+import { createHash } from 'crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const skillRoot = join(__dirname, '..');
@@ -36,108 +38,42 @@ async function loadBeautifulMermaid() {
   }
 }
 
-// Convert SVG with CSS variables to flat SVG with actual colors
-function flattenSvg(svg, colors) {
-  const styleMatch = svg.match(/style="([^"]*)"/);
-  const cssVars = {};
-  
-  if (styleMatch) {
-    const style = styleMatch[1];
-    const varMatches = style.matchAll(/--([\w-]+):([^;]+)/g);
-    for (const match of varMatches) {
-      cssVars[`--${match[1].trim()}`] = match[2].trim();
-    }
-  }
-  
-  const allVars = { ...cssVars, ...colors };
-  
-  const bg = allVars['--bg'] || allVars.bg || '#FFFFFF';
-  const fg = allVars['--fg'] || allVars.fg || '#27272A';
-  const line = allVars['--line'] || allVars.line || mixColors(fg, bg, 0.3);
-  const accent = allVars['--accent'] || allVars.accent || mixColors(fg, bg, 0.5);
-  const muted = allVars['--muted'] || allVars.muted || mixColors(fg, bg, 0.4);
-  const surface = allVars['--surface'] || allVars.surface || mixColors(fg, bg, 0.03);
-  const border = allVars['--border'] || allVars.border || mixColors(fg, bg, 0.2);
-  
-  const computed = {
-    '--bg': bg,
-    '--fg': fg,
-    '--line': line,
-    '--accent': accent,
-    '--muted': muted,
-    '--surface': surface,
-    '--border': border,
-    '--_text': fg,
-    '--_text-sec': muted,
-    '--_text-muted': muted,
-    '--_text-faint': mixColors(fg, bg, 0.25),
-    '--_line': line,
-    '--_arrow': accent,
-    '--_node-fill': surface,
-    '--_node-stroke': border,
-    '--_group-fill': bg,
-    '--_group-hdr': mixColors(fg, bg, 0.05),
-    '--_inner-stroke': mixColors(fg, bg, 0.12),
-    '--_key-badge': mixColors(fg, bg, 0.1),
-  };
-  
-  let flatSvg = svg;
-  for (const [varName, value] of Object.entries(computed)) {
-    const regex = new RegExp(`var\\(${varName.replace('--', '\\-\\-')}\\)`, 'g');
-    flatSvg = flatSvg.replace(regex, value);
-  }
-  
-  flatSvg = flatSvg.replace(/style="[^"]*--[\w-]+:[^;]+;?\s*/g, (match) => {
-    const cleaned = match.replace(/--[\w-]+:[^;]+;?\s*/g, '');
-    return cleaned === 'style=""' ? '' : cleaned;
-  });
-  
-  flatSvg = flatSvg.replace(/\u003cstyle\u003e[\s\S]*?@import[\s\S]*?\u003c\/style\u003e/, '');
-  
-  return flatSvg;
-}
+// Import shared utilities
+const { flattenSvg, validateWidth, getRsvgInstallHelp } = await import('./svg-utils.mjs');
 
-function mixColors(fg, bg, ratio) {
-  const fgRgb = hexToRgb(fg);
-  const bgRgb = hexToRgb(bg);
-  if (!fgRgb || !bgRgb) return fg;
-  
-  const r = Math.round(bgRgb.r + (fgRgb.r - bgRgb.r) * ratio);
-  const g = Math.round(bgRgb.g + (fgRgb.g - bgRgb.g) * ratio);
-  const b = Math.round(bgRgb.b + (fgRgb.b - bgRgb.b) * ratio);
-  
-  return rgbToHex(r, g, b);
-}
-
-function hexToRgb(hex) {
-  const match = hex.match(/^#([0-9a-fA-F]{6})$/);
-  if (!match) return null;
-  const bigint = parseInt(match[1], 16);
-  return {
-    r: (bigint >> 16) & 255,
-    g: (bigint >> 8) & 255,
-    b: bigint & 255,
-  };
-}
-
-function rgbToHex(r, g, b) {
-  return '#' + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('');
-}
-
+// Convert SVG to PNG using rsvg-convert
 function svgToPng(svg, outputPath, width = 800) {
-  const tempSvg = outputPath.replace(/\.png$/, '.temp.svg');
+  // Validate width
+  const validWidth = validateWidth(width, 800);
+
+  // Create temp file in system temp directory with unique name
+  const hash = createHash('md5').update(outputPath + Date.now()).digest('hex').slice(0, 12);
+  const tempSvg = join(tmpdir(), `mermaid-${hash}.temp.svg`);
+
   writeFileSync(tempSvg, svg);
-  
+
   try {
-    execSync(`rsvg-convert --width ${width} "${tempSvg}" -o "${outputPath}"`, {
+    // Use array-based command to prevent injection
+    execSync('rsvg-convert', [
+      '--width', String(validWidth),
+      tempSvg,
+      '-o', outputPath
+    ], {
       stdio: ['pipe', 'pipe', 'inherit'],
       timeout: 30000,
     });
-    try { writeFileSync(tempSvg, ''); } catch {}
     return true;
   } catch (e) {
     console.error(`PNG conversion failed: ${e.message}`);
+    console.error(getRsvgInstallHelp());
     return false;
+  } finally {
+    // Clean up temp file
+    try {
+      unlinkSync(tempSvg);
+    } catch (cleanupErr) {
+      // Ignore cleanup errors
+    }
   }
 }
 
@@ -167,7 +103,7 @@ function parseArgs() {
       case '--theme': case '-t': opts.theme = val; i++; break;
       case '--bg': opts.bg = val; i++; break;
       case '--fg': opts.fg = val; i++; break;
-      case '--width': opts.width = parseInt(val); i++; break;
+      case '--width': opts.width = validateWidth(val, 800); i++; break;
       case '--transparent': opts.transparent = true; break;
       case '--use-ascii': opts.useAscii = true; break;
       case '--workers': case '-w': opts.workers = parseInt(val); i++; break;
