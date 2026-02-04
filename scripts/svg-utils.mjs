@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // Shared utilities for SVG processing and PNG conversion
 
-import { execSync } from 'child_process';
+import { spawnSync } from 'child_process';
 import { writeFileSync, unlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { randomBytes } from 'crypto';
 
 /**
  * Convert SVG with CSS variables to flat SVG with actual colors
@@ -219,15 +220,14 @@ export function svgToPng(svg, outputPath, width = 800) {
   const validWidth = validateWidth(width, 800);
 
   // Create temp file in system temp directory with random name
-  const crypto = await import('crypto');
-  const randomId = crypto.randomBytes(8).toString('hex');
+  const randomId = randomBytes(8).toString('hex');
   const tempSvg = join(tmpdir(), `mermaid-${randomId}.temp.svg`);
 
   writeFileSync(tempSvg, svg);
 
   try {
-    // Use array-based command to prevent injection
-    execSync('rsvg-convert', [
+    // Use spawnSync with array arguments to prevent injection
+    const result = spawnSync('rsvg-convert', [
       '--width', String(validWidth),
       tempSvg,
       '-o', outputPath
@@ -235,6 +235,9 @@ export function svgToPng(svg, outputPath, width = 800) {
       stdio: ['pipe', 'pipe', 'inherit'],
       timeout: 30000,
     });
+    if (result.status !== 0) {
+      throw new Error(`rsvg-convert exited with code ${result.status}`);
+    }
     return true;
   } catch (e) {
     console.error(`PNG conversion failed: ${e.message}`);

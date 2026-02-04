@@ -1,11 +1,8 @@
 #!/usr/bin/env node
 
-import { execSync } from 'child_process';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from 'fs';
-import { tmpdir } from 'os';
-import { createHash } from 'crypto';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const skillRoot = join(__dirname, '..');
@@ -39,43 +36,7 @@ async function loadBeautifulMermaid() {
 }
 
 // Import shared utilities
-const { flattenSvg, validateWidth, getRsvgInstallHelp } = await import('./svg-utils.mjs');
-
-// Convert SVG to PNG using rsvg-convert
-function svgToPng(svg, outputPath, width = 800) {
-  // Validate width
-  const validWidth = validateWidth(width, 800);
-
-  // Create temp file in system temp directory with unique name
-  const hash = createHash('md5').update(outputPath + Date.now()).digest('hex').slice(0, 12);
-  const tempSvg = join(tmpdir(), `mermaid-${hash}.temp.svg`);
-
-  writeFileSync(tempSvg, svg);
-
-  try {
-    // Use array-based command to prevent injection
-    execSync('rsvg-convert', [
-      '--width', String(validWidth),
-      tempSvg,
-      '-o', outputPath
-    ], {
-      stdio: ['pipe', 'pipe', 'inherit'],
-      timeout: 30000,
-    });
-    return true;
-  } catch (e) {
-    console.error(`PNG conversion failed: ${e.message}`);
-    console.error(getRsvgInstallHelp());
-    return false;
-  } finally {
-    // Clean up temp file
-    try {
-      unlinkSync(tempSvg);
-    } catch (cleanupErr) {
-      // Ignore cleanup errors
-    }
-  }
-}
+const { flattenSvg, validateWidth, getRsvgInstallHelp, svgToPng } = await import('./svg-utils.mjs');
 
 function parseArgs() {
   const args = process.argv.slice(2);
