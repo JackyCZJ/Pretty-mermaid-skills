@@ -15,7 +15,7 @@ async function loadBeautifulMermaid() {
 
   console.error('[beautiful-mermaid] Dependency not found. Installing automatically...');
   try {
-    execSync('npm install --no-fund --no-audit', {
+    execSync('npm', ['install', '--no-fund', '--no-audit'], {
       cwd: skillRoot,
       stdio: ['pipe', 'pipe', 'inherit'],
       timeout: 120000,

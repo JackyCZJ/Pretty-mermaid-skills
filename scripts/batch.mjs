@@ -15,7 +15,7 @@ async function loadBeautifulMermaid() {
 
   console.error('[beautiful-mermaid] Dependency not found. Installing automatically...');
   try {
-    execSync('npm install --no-fund --no-audit', {
+    execSync('npm', ['install', '--no-fund', '--no-audit'], {
       cwd: skillRoot,
       stdio: ['pipe', 'pipe', 'inherit'],
       timeout: 120000,
@@ -68,7 +68,7 @@ function parseArgs() {
       case '--width': opts.width = validateWidth(val, 800); i++; break;
       case '--transparent': opts.transparent = true; break;
       case '--use-ascii': opts.useAscii = true; break;
-      case '--workers': case '-w': opts.workers = parseInt(val); i++; break;
+      case '--workers': case '-w': opts.workers = Math.max(1, Math.min(parseInt(val) || 4, 16)); i++; break;
       case '--help': case '-h':
         console.log(`Usage: node batch.mjs --input-dir <dir> --output-dir <dir> [options]
 
