@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { execSync } from 'child_process';
+import { spawnSync } from 'child_process';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
@@ -15,11 +15,17 @@ async function loadBeautifulMermaid() {
 
   console.error('[beautiful-mermaid] Dependency not found. Installing automatically...');
   try {
-    execSync('npm install --no-fund --no-audit', {
+    const result = spawnSync('npm', ['install', '--no-fund', '--no-audit'], {
       cwd: skillRoot,
-      stdio: ['pipe', 'pipe', 'inherit'],
+      stdio: 'inherit',
       timeout: 120000,
     });
+    if (result.error) {
+      throw new Error(`npm not found: ${result.error.message}`);
+    }
+    if (result.status !== 0) {
+      throw new Error(`npm install exited with code ${result.status}`);
+    }
     console.error('[beautiful-mermaid] Installed successfully.\n');
   } catch (e) {
     console.error(`[beautiful-mermaid] Auto-install failed: ${e.message}`);
@@ -36,6 +42,9 @@ async function loadBeautifulMermaid() {
   }
 }
 
+// Import shared utilities
+const { flattenSvg, validateWidth, svgToPng } = await import('./svg-utils.mjs');
+
 function parseArgs() {
   const args = process.argv.slice(2);
   const opts = {
@@ -51,6 +60,7 @@ function parseArgs() {
     paddingX: 5,
     paddingY: 5,
     boxBorderPadding: 1,
+    width: 800,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -70,18 +80,19 @@ function parseArgs() {
       case '--surface': opts.surface = val; i++; break;
       case '--border': opts.border = val; i++; break;
       case '--font': opts.font = val; i++; break;
+      case '--width': opts.width = validateWidth(val, 800); i++; break;
       case '--transparent': opts.transparent = true; break;
       case '--use-ascii': opts.useAscii = true; break;
       case '--padding-x': opts.paddingX = parseInt(val); i++; break;
       case '--padding-y': opts.paddingY = parseInt(val); i++; break;
       case '--box-border-padding': opts.boxBorderPadding = parseInt(val); i++; break;
       case '--help': case '-h':
-        console.log(`Usage: node render.mjs --input <file> [options]
+        console.log(`Usage: node scripts/render.mjs --input <file> [options]
 
 Options:
   -i, --input <file>       Input Mermaid file (.mmd) [required]
   -o, --output <file>      Output file (default: stdout)
-  -f, --format <fmt>       Output format: svg | ascii (default: svg)
+  -f, --format <fmt>       Output format: svg | png | ascii (default: svg)
   -t, --theme <name>       Theme name (e.g. tokyo-night, dracula)
       --bg <hex>           Background color
       --fg <hex>           Foreground color
@@ -91,11 +102,17 @@ Options:
       --surface <hex>      Node fill tint color
       --border <hex>       Node stroke color
       --font <name>        Font family (default: Inter)
+      --width <n>           PNG width in pixels (default: 800)
       --transparent        Transparent background (SVG only)
       --use-ascii          Pure ASCII instead of Unicode (ASCII only)
       --padding-x <n>      Horizontal spacing (ASCII only, default: 5)
       --padding-y <n>      Vertical spacing (ASCII only, default: 5)
-      --box-border-padding <n>  Padding inside node boxes (ASCII only, default: 1)`);
+      --box-border-padding <n>  Padding inside node boxes (ASCII only, default: 1)
+
+Examples:
+  node scripts/render.mjs -i diagram.mmd -o output.svg -t tokyo-night
+  node scripts/render.mjs -i diagram.mmd -o output.png -t dracula --width 1200
+  node scripts/render.mjs -i diagram.mmd -f ascii`);
         process.exit(0);
     }
   }
@@ -131,24 +148,43 @@ async function main() {
     } else {
       console.log(ascii);
     }
+    return;
+  }
+
+  const theme = opts.theme ? THEMES[opts.theme] : undefined;
+  const colors = theme || {
+    bg: opts.bg,
+    fg: opts.fg,
+    ...(opts.line && { line: opts.line }),
+    ...(opts.accent && { accent: opts.accent }),
+    ...(opts.muted && { muted: opts.muted }),
+    ...(opts.surface && { surface: opts.surface }),
+    ...(opts.border && { border: opts.border }),
+  };
+
+  const svg = await renderMermaid(input, {
+    ...colors,
+    font: opts.font,
+    transparent: opts.transparent,
+  });
+
+  if (opts.format === 'png') {
+    const flatSvg = flattenSvg(svg, colors);
+    const outputPath = opts.output || opts.input.replace(/\.mmd$/, '.png');
+
+    if (svgToPng(flatSvg, outputPath, opts.width)) {
+      console.log(`PNG diagram saved to ${outputPath}`);
+    } else {
+      // Fallback to SVG if PNG conversion fails
+      const svgPath = outputPath.endsWith('.png') 
+        ? outputPath.replace(/\.png$/, '.svg')
+        : `${outputPath}.svg`;
+      writeFileSync(svgPath, svg);
+      console.log(`PNG conversion failed, saved SVG to ${svgPath}`);
+      process.exit(1);
+    }
   } else {
-    const theme = opts.theme ? THEMES[opts.theme] : undefined;
-    const colors = theme || {
-      bg: opts.bg,
-      fg: opts.fg,
-      ...(opts.line && { line: opts.line }),
-      ...(opts.accent && { accent: opts.accent }),
-      ...(opts.muted && { muted: opts.muted }),
-      ...(opts.surface && { surface: opts.surface }),
-      ...(opts.border && { border: opts.border }),
-    };
-
-    const svg = await renderMermaid(input, {
-      ...colors,
-      font: opts.font,
-      transparent: opts.transparent,
-    });
-
+    // SVG output
     if (opts.output) {
       writeFileSync(opts.output, svg);
       console.log(`SVG diagram saved to ${opts.output}`);

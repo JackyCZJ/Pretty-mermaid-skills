@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { execSync } from 'child_process';
+import { spawnSync } from 'child_process';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
@@ -15,11 +15,17 @@ async function loadBeautifulMermaid() {
 
   console.error('[beautiful-mermaid] Dependency not found. Installing automatically...');
   try {
-    execSync('npm install --no-fund --no-audit', {
+    const result = spawnSync('npm', ['install', '--no-fund', '--no-audit'], {
       cwd: skillRoot,
-      stdio: ['pipe', 'pipe', 'inherit'],
+      stdio: 'inherit',
       timeout: 120000,
     });
+    if (result.error) {
+      throw new Error(`npm not found: ${result.error.message}`);
+    }
+    if (result.status !== 0) {
+      throw new Error(`npm install exited with code ${result.status}`);
+    }
     console.error('[beautiful-mermaid] Installed successfully.\n');
   } catch (e) {
     console.error(`[beautiful-mermaid] Auto-install failed: ${e.message}`);
@@ -36,6 +42,9 @@ async function loadBeautifulMermaid() {
   }
 }
 
+// Import shared utilities
+const { flattenSvg, validateWidth, svgToPng } = await import('./svg-utils.mjs');
+
 function parseArgs() {
   const args = process.argv.slice(2);
   const opts = {
@@ -48,6 +57,7 @@ function parseArgs() {
     transparent: false,
     useAscii: false,
     workers: 4,
+    width: 800,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -61,19 +71,21 @@ function parseArgs() {
       case '--theme': case '-t': opts.theme = val; i++; break;
       case '--bg': opts.bg = val; i++; break;
       case '--fg': opts.fg = val; i++; break;
+      case '--width': opts.width = validateWidth(val, 800); i++; break;
       case '--transparent': opts.transparent = true; break;
       case '--use-ascii': opts.useAscii = true; break;
-      case '--workers': case '-w': opts.workers = parseInt(val); i++; break;
+      case '--workers': case '-w': opts.workers = Math.max(1, Math.min(parseInt(val) || 4, 16)); i++; break;
       case '--help': case '-h':
         console.log(`Usage: node batch.mjs --input-dir <dir> --output-dir <dir> [options]
 
 Options:
   -i, --input-dir <dir>    Input directory containing .mmd files [required]
   -o, --output-dir <dir>   Output directory for rendered files [required]
-  -f, --format <fmt>       Output format: svg | ascii (default: svg)
+  -f, --format <fmt>       Output format: svg | png | ascii (default: svg)
   -t, --theme <name>       Theme name (e.g. tokyo-night, dracula)
       --bg <hex>           Background color
       --fg <hex>           Foreground color
+      --width <n>           PNG width in pixels (default: 800)
       --transparent        Transparent background (SVG only)
       --use-ascii          Pure ASCII instead of Unicode (ASCII only)
   -w, --workers <n>        Parallel workers (default: 4)`);
@@ -100,24 +112,39 @@ Options:
 async function renderFile(file, inputDir, outputDir, opts, lib) {
   const { renderMermaid, renderMermaidAscii, THEMES } = lib;
   const inputPath = join(inputDir, file);
-  const ext = opts.format === 'svg' ? '.svg' : '.txt';
-  const outputPath = join(outputDir, file.replace(/\.mmd$/, ext));
   const input = readFileSync(inputPath, 'utf8');
 
   if (opts.format === 'ascii') {
+    const ext = '.txt';
+    const outputPath = join(outputDir, file.replace(/\.mmd$/, ext));
     const ascii = renderMermaidAscii(input, { useAscii: opts.useAscii });
     writeFileSync(outputPath, ascii);
-  } else {
-    const theme = opts.theme ? THEMES[opts.theme] : undefined;
-    const colors = theme || {
-      ...(opts.bg && { bg: opts.bg }),
-      ...(opts.fg && { fg: opts.fg }),
-    };
+    return;
+  }
 
-    const svg = await renderMermaid(input, {
-      ...colors,
-      transparent: opts.transparent,
-    });
+  const theme = opts.theme ? THEMES[opts.theme] : undefined;
+  const colors = theme || {
+    ...(opts.bg && { bg: opts.bg }),
+    ...(opts.fg && { fg: opts.fg }),
+  };
+
+  const svg = await renderMermaid(input, {
+    ...colors,
+    transparent: opts.transparent,
+  });
+
+  if (opts.format === 'png') {
+    const flatSvg = flattenSvg(svg, colors);
+    const pngPath = join(outputDir, file.replace(/\.mmd$/, '.png'));
+    if (!svgToPng(flatSvg, pngPath, opts.width)) {
+      // Fallback to SVG if PNG conversion fails (consistent with render.mjs)
+      const svgPath = join(outputDir, file.replace(/\.mmd$/, '.svg'));
+      writeFileSync(svgPath, svg);
+      console.error(`  PNG conversion failed for ${file}, saved SVG to ${svgPath}`);
+      throw new Error(`PNG conversion failed for ${file} (fallback SVG saved)`);
+    }
+  } else {
+    const outputPath = join(outputDir, file.replace(/\.mmd$/, '.svg'));
     writeFileSync(outputPath, svg);
   }
 }
@@ -139,7 +166,6 @@ async function main() {
   let success = 0;
   const failed = [];
 
-  // Process in batches of `workers` size
   for (let i = 0; i < files.length; i += opts.workers) {
     const batch = files.slice(i, i + opts.workers);
     const results = await Promise.allSettled(
