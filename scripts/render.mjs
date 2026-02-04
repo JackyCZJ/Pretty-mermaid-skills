@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { execSync } from 'child_process';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
