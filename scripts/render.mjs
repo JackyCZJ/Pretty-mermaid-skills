@@ -62,6 +62,8 @@ function parseArgs() {
     boxBorderPadding: 1,
     width: 800,
   };
+  // Track which color options were explicitly set by user
+  const userColors = {};
 
   for (let i = 0; i < args.length; i++) {
     const key = args[i];
@@ -72,13 +74,13 @@ function parseArgs() {
       case '--output': case '-o': opts.output = val; i++; break;
       case '--format': case '-f': opts.format = val; i++; break;
       case '--theme': case '-t': opts.theme = val; i++; break;
-      case '--bg': opts.bg = val; i++; break;
-      case '--fg': opts.fg = val; i++; break;
-      case '--line': opts.line = val; i++; break;
-      case '--accent': opts.accent = val; i++; break;
-      case '--muted': opts.muted = val; i++; break;
-      case '--surface': opts.surface = val; i++; break;
-      case '--border': opts.border = val; i++; break;
+      case '--bg': opts.bg = val; userColors.bg = val; i++; break;
+      case '--fg': opts.fg = val; userColors.fg = val; i++; break;
+      case '--line': opts.line = val; userColors.line = val; i++; break;
+      case '--accent': opts.accent = val; userColors.accent = val; i++; break;
+      case '--muted': opts.muted = val; userColors.muted = val; i++; break;
+      case '--surface': opts.surface = val; userColors.surface = val; i++; break;
+      case '--border': opts.border = val; userColors.border = val; i++; break;
       case '--font': opts.font = val; i++; break;
       case '--width': opts.width = validateWidth(val, 800); i++; break;
       case '--transparent': opts.transparent = true; break;
@@ -127,11 +129,11 @@ Examples:
     process.exit(1);
   }
 
-  return opts;
+  return { ...opts, userColors };
 }
 
 async function main() {
-  const opts = parseArgs();
+  const { userColors, ...opts } = parseArgs();
   const { renderMermaid, renderMermaidAscii, THEMES } = await loadBeautifulMermaid();
   const input = readFileSync(opts.input, 'utf8');
 
@@ -152,7 +154,8 @@ async function main() {
   }
 
   const theme = opts.theme ? THEMES[opts.theme] : undefined;
-  const colors = theme || {
+  // For Mermaid rendering, always use defaults (for theme consistency)
+  const renderColors = theme || {
     bg: opts.bg,
     fg: opts.fg,
     ...(opts.line && { line: opts.line }),
@@ -163,14 +166,18 @@ async function main() {
   };
 
   const svg = await renderMermaid(input, {
-    ...colors,
+    ...renderColors,
     font: opts.font,
     transparent: opts.transparent,
   });
 
   if (opts.format === 'png') {
-    const flatSvg = flattenSvg(svg, colors);
-    const outputPath = opts.output || opts.input.replace(/\.mmd$/, '.png');
+    // For PNG flattening, only pass user-explicit colors to preserve SVG values
+    const flatSvg = flattenSvg(svg, userColors);
+    // Generate output path: if input has extension, replace with .png; otherwise append .png
+    const outputPath = opts.output || (opts.input.match(/\.[^./]+$/) 
+      ? opts.input.replace(/\.[^./]+$/, '.png')
+      : `${opts.input}.png`);
 
     if (svgToPng(flatSvg, outputPath, opts.width)) {
       console.log(`PNG diagram saved to ${outputPath}`);
