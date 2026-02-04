@@ -175,9 +175,16 @@ async function main() {
     // For PNG flattening, only pass user-explicit colors to preserve SVG values
     const flatSvg = flattenSvg(svg, userColors);
     // Generate output path: if input has extension, replace with .png; otherwise append .png
-    const outputPath = opts.output || (opts.input.match(/\.[^./]+$/) 
+    let outputPath = opts.output || (opts.input.match(/\.[^./]+$/) 
       ? opts.input.replace(/\.[^./]+$/, '.png')
       : `${opts.input}.png`);
+    
+    // Warn and auto-correct if output path doesn't end with .png
+    if (!outputPath.toLowerCase().endsWith('.png')) {
+      console.warn(`Warning: PNG format requested but output path "${outputPath}" doesn't end with .png`);
+      outputPath = outputPath.replace(/\.[^./]+$/, '') + '.png';
+      console.warn(`Auto-corrected to: ${outputPath}`);
+    }
 
     if (svgToPng(flatSvg, outputPath, opts.width)) {
       console.log(`PNG diagram saved to ${outputPath}`);
