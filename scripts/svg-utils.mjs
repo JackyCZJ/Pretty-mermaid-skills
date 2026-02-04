@@ -8,35 +8,104 @@ import { join } from 'path';
 import { randomBytes } from 'crypto';
 
 /**
- * Extract CSS variables from SVG (style attribute and <style> blocks)
- * @param {string} svg - The SVG content
- * @returns {object} CSS variables map
+ * Parse CSS rules from style content, preserving selector scope
+ * @param {string} styleContent - CSS content
+ * @returns {Array<{selector: string, declarations: Map<string, string>}>}
  */
-function extractCssVars(svg) {
-  const cssVars = {};
+function parseCssRules(styleContent) {
+  const rules = [];
+  // Match CSS rules: selector { declarations }
+  const ruleRegex = /([^{]+)\{([^}]*)\}/g;
+  let match;
   
-  // 1. Extract from style attribute
-  const styleMatch = svg.match(/style=("|')([^"']*)\1/);
-  if (styleMatch) {
-    const style = styleMatch[2];
-    const varMatches = style.matchAll(/--([\w-]+):([^;]+)/g);
-    for (const match of varMatches) {
-      cssVars[`--${match[1].trim()}`] = match[2].trim();
+  while ((match = ruleRegex.exec(styleContent)) !== null) {
+    const selector = match[1].trim();
+    const declBlock = match[2];
+    const declarations = new Map();
+    
+    // Parse declarations within this rule
+    const declMatches = declBlock.matchAll(/--([\w-]+)\s*:\s*([^;]+)/g);
+    for (const decl of declMatches) {
+      declarations.set(`--${decl[1].trim()}`, decl[2].trim());
+    }
+    
+    if (declarations.size > 0) {
+      rules.push({ selector, declarations });
     }
   }
   
-  // 2. Extract from <style> blocks (including :root, svg, etc.)
+  return rules;
+}
+
+/**
+ * Extract CSS variables from SVG, preserving selector scope
+ * @param {string} svg - The SVG content
+ * @returns {object} CSS variables map with scope info
+ */
+function extractCssVars(svg) {
+  const cssVars = {
+    inline: {},      // From style attributes (merged from all elements)
+    scoped: [],      // From <style> blocks with selectors
+    global: {}       // From :root, svg, etc. (treated as global)
+  };
+  
+  // 1. Extract from ALL style attributes (inline, highest specificity)
+  // Use matchAll to find all style attributes, not just the first one
+  const styleMatches = svg.matchAll(/style=(["'])([^"']*?)\1/g);
+  for (const styleMatch of styleMatches) {
+    const style = styleMatch[2];
+    const varMatches = style.matchAll(/--([\w-]+):([^;]+)/g);
+    for (const match of varMatches) {
+      cssVars.inline[`--${match[1].trim()}`] = match[2].trim();
+    }
+  }
+  
+  // 2. Extract from <style> blocks, preserving scope
   const styleBlocks = svg.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gi);
   for (const block of styleBlocks) {
     const styleContent = block[1];
-    // Match variable declarations in CSS rules
-    const varMatches = styleContent.matchAll(/--([\w-]+)\s*:\s*([^;]+)/g);
-    for (const match of varMatches) {
-      cssVars[`--${match[1].trim()}`] = match[2].trim();
+    const rules = parseCssRules(styleContent);
+    
+    for (const rule of rules) {
+      // Treat :root, html, body, svg as global scope
+      const isGlobal = /^(::?root|html|body|svg|\*)$/i.test(rule.selector);
+      
+      if (isGlobal) {
+        for (const [name, value] of rule.declarations) {
+          cssVars.global[name] = value;
+        }
+      } else {
+        cssVars.scoped.push(rule);
+      }
     }
   }
   
   return cssVars;
+}
+
+/**
+ * Get effective variable value considering scope
+ * @param {object} cssVars - Parsed CSS variables
+ * @param {string} varName - Variable name
+ * @param {string} context - Context for scope matching (e.g., 'dark', 'light')
+ * @returns {string|undefined}
+ */
+function getScopedVar(cssVars, varName, context = '') {
+  // Priority: inline > scoped (matching context) > global
+  if (cssVars.inline[varName] !== undefined) {
+    return cssVars.inline[varName];
+  }
+  
+  // Check scoped rules that match context
+  for (const rule of cssVars.scoped) {
+    if (context && rule.selector.includes(context)) {
+      if (rule.declarations.has(varName)) {
+        return rule.declarations.get(varName);
+      }
+    }
+  }
+  
+  return cssVars.global[varName];
 }
 
 /**
@@ -46,20 +115,25 @@ function extractCssVars(svg) {
  * @returns {string} Flattened SVG
  */
 export function flattenSvg(svg, colors) {
-  // Extract CSS variables from all sources
+  // Extract CSS variables with scope preservation
   const cssVars = extractCssVars(svg);
   
-  // Merge with provided colors (provided colors take precedence)
-  const allVars = { ...cssVars, ...colors };
+  // Build effective variable map (merge inline + global, with overrides)
+  const effectiveVars = { 
+    ...cssVars.global, 
+    ...cssVars.inline,
+    ...colors 
+  };
 
   // Compute derived colors
-  const bg = allVars['--bg'] || allVars.bg || '#FFFFFF';
-  const fg = allVars['--fg'] || allVars.fg || '#27272A';
-  const line = allVars['--line'] || allVars.line || mixColors(fg, bg, 0.3);
-  const accent = allVars['--accent'] || allVars.accent || mixColors(fg, bg, 0.5);
-  const muted = allVars['--muted'] || allVars.muted || mixColors(fg, bg, 0.4);
-  const surface = allVars['--surface'] || allVars.surface || mixColors(fg, bg, 0.03);
-  const border = allVars['--border'] || allVars.border || mixColors(fg, bg, 0.2);
+  // Priority: user-provided colors (bg/fg) > SVG CSS variables (--bg/--fg) > defaults
+  const bg = effectiveVars.bg || effectiveVars['--bg'] || '#FFFFFF';
+  const fg = effectiveVars.fg || effectiveVars['--fg'] || '#27272A';
+  const line = effectiveVars.line || effectiveVars['--line'] || mixColors(fg, bg, 0.3);
+  const accent = effectiveVars.accent || effectiveVars['--accent'] || mixColors(fg, bg, 0.5);
+  const muted = effectiveVars.muted || effectiveVars['--muted'] || mixColors(fg, bg, 0.4);
+  const surface = effectiveVars.surface || effectiveVars['--surface'] || mixColors(fg, bg, 0.03);
+  const border = effectiveVars.border || effectiveVars['--border'] || mixColors(fg, bg, 0.2);
 
   const computed = {
     '--bg': bg,
@@ -83,22 +157,27 @@ export function flattenSvg(svg, colors) {
     '--_key-badge': mixColors(fg, bg, 0.1),
   };
 
+  // Track which variables we're replacing
+  const replacedVars = new Set(Object.keys(computed));
+
   // Replace CSS variables with actual values in a single pass
   // Support both var(--name) and var(--name, fallback)
   const varNames = Object.keys(computed);
   const escapedVarNames = varNames.map((name) =>
     name.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')
   );
-  // Match var(--name) or var(--name, fallback) - capture the variable name
-  const varRegex = new RegExp(`var\\((${escapedVarNames.join('|')})(?:\\s*,\\s*[^)]+)?\\)`, 'g');
+  // Match var(--name) or var(--name, fallback) - handle nested parentheses in fallback
+  // Use a depth-based approach to match balanced parentheses
+  const varRegex = new RegExp(`var\\((${escapedVarNames.join('|')})(?:\\s*,\\s*([\\s\\S]*?))?\\)(?![^(]*\\))`, 'g');
 
-  let flatSvg = svg.replace(varRegex, (match, varName) => {
+  let flatSvg = svg.replace(varRegex, (match, varName, fallback) => {
     const replacement = computed[varName];
     return typeof replacement === 'string' ? replacement : match;
   });
 
   // Remove CSS custom properties from style attributes
-  flatSvg = flatSvg.replace(/style=("|')([^"]*)\1/g, (fullMatch, quote, styleContent) => {
+  // Handle both single and double quotes: style="..." or style='...'
+  flatSvg = flatSvg.replace(/style=(["'])([^"']*?)\1/g, (fullMatch, quote, styleContent) => {
     const declarations = styleContent
       .split(';')
       .map(part => part.trim())
@@ -108,7 +187,9 @@ export function flattenSvg(svg, colors) {
       const colonIndex = part.indexOf(':');
       if (colonIndex === -1) return true;
       const propName = part.slice(0, colonIndex).trim();
-      return !propName.startsWith('--');
+      // Only remove variables that were replaced, keep others
+      if (!propName.startsWith('--')) return true;
+      return !replacedVars.has(propName);
     });
 
     if (kept.length === 0) {
@@ -119,18 +200,41 @@ export function flattenSvg(svg, colors) {
     return `style=${quote}${cleanedContent}${quote}`;
   });
 
-  // Remove only @import lines and CSS variable definitions from style blocks
+  // Clean up style blocks: remove @import and only remove CSS variable declarations
+  // that were actually replaced, preserve unreferenced variables
   flatSvg = flatSvg.replace(/<style[^>]*>([\s\S]*?)<\/style>/gi, (match, styleContent) => {
     let cleanedContent = styleContent
-      // Remove @import statements
-      .replace(/@import\s+[^;]+;/gi, '')
-      // Remove CSS variable declarations (--var-name: value;)
-      .replace(/--[\w-]+\s*:\s*[^;]+;/gi, '')
-      // Clean up extra whitespace
+      // Remove @import statements (handle parentheses properly for URLs with semicolons)
+      .replace(/@import\s+url\([^)]+\);?/gi, '')
+      .replace(/@import\s+["'][^"']+["'];?/gi, '');
+    
+    // Remove only the CSS variable declarations that we replaced
+    // Build regex for replaced variables only
+    if (replacedVars.size > 0) {
+      const escapedReplaced = Array.from(replacedVars).map(name =>
+        name.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')
+      );
+      const removeRegex = new RegExp(`\\s*(${escapedReplaced.join('|')})\\s*:\\s*[^;]*?;`, 'g');
+      cleanedContent = cleanedContent.replace(removeRegex, '');
+    }
+    
+    // Clean up whitespace
+    cleanedContent = cleanedContent
       .replace(/\n\s*\n/g, '\n')
       .trim();
     
-    if (!cleanedContent) {
+    // Remove CSS rules that have no declarations (like `:root { }` after removing variables)
+    // Match selector { optional whitespace } with no declarations in between
+    // Selector can contain letters, numbers, hyphens, colons, dots, spaces, etc.
+    cleanedContent = cleanedContent
+      .replace(/[^{}]+?\{\s*\}/g, '')
+      .replace(/\n\s*\n/g, '\n')
+      .trim();
+    
+    // Only remove style blocks that are completely empty
+    const hasContent = /[^{}\s]/.test(cleanedContent);
+    
+    if (!hasContent) {
       return '';
     }
     return `<style>${cleanedContent}</style>`;
@@ -217,17 +321,6 @@ export function validateWidth(width, defaultWidth = 800) {
     return defaultWidth;
   }
   return parsed;
-}
-
-/**
- * Sanitize a filename to prevent command injection
- * @param {string} filename - Input filename
- * @returns {string} Sanitized filename
- */
-export function sanitizeFilename(filename) {
-  // Remove any characters that could be used for command injection
-  // Allow only alphanumeric, dash, underscore, dot, and forward slash
-  return filename.replace(/[^a-zA-Z0-9_./-]/g, '');
 }
 
 /**
